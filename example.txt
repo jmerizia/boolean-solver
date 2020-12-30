@@ -1,5 +1,35 @@
-# comment
-(* (+ a b) (~ 1) )
-a
-1
-(~ 1)
+# Associativity
+axiom ass_add : (+ a (+ b c)) = (+ (+ a b) c).
+axiom ass_mul : (* a (* b c)) = (* (* a b) c).
+
+# Commutativity
+axiom com_add : (+ a b) = (+ b a).
+axiom com_mul : (* a b) = (* b a).
+
+# Absorption
+axiom abs_add : (+ a (* a b)) = a.
+axiom abs_mul : (* a (+ a b)) = a.
+
+# Identity
+axiom ide_add : (+ a 0) = a.
+axiom ide_mul : (* a 1) = a.
+
+# Distributive
+axiom dis_add : (+ a (* b c)) = (* (+ a b) (+ a c)).
+axiom dis_mul : (* a (+ b c)) = (+ (* a b) (* a c)).
+
+# Complements/Inverses
+axiom inv_add : (+ a (~ a)) = 1.
+axiom inv_mul : (* a (~ a)) = 0.
+
+
+# Proof of trivial length
+prove 1 = 1.  
+
+# Simple identities
+prove (+ 0 1) = 1.
+prove (+ 1 0) = 1.
+prove (* k 1) = k.
+
+# Prove null-law (slower)
+prove (* k 0) = 0.

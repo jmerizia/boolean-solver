@@ -1,4 +1,10 @@
-from fire import Fire
+from collections import deque
+import itertools
+import time
+import cProfile
+from functools import lru_cache
+import random
+import sys
 
 """
 Grammar
@@ -17,6 +23,31 @@ variable_tokens = 'abcdefghijklmnopqrstuvwxyz' + \
                   'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 operator_tokens = '*+~'
 all_tokens = '()' + primitive_tokens + variable_tokens + operator_tokens
+
+LARGE_PRIME = 1000_000_007
+
+# primes = []
+# def generate_primes(n=10000):
+#     is_prime = [True] * n
+#     is_prime[0] = False
+#     is_prime[1] = False
+#     for i in range(2, n):
+#         for k in range(i*i, n, i):
+#             is_prime[k] = False
+#     for i in range(2, n):
+#         if is_prime[i]:
+#             primes.append(i)
+# generate_primes(n=1000)
+
+
+@lru_cache(10000)
+def hash_string(s):
+    h = 0
+    n = len(s)
+    for i, c in enumerate(s):
+        h += ord(c) * pow(31, n-i-1, LARGE_PRIME)
+    return h % LARGE_PRIME
+
 
 axioms = [
     # Associativity
@@ -39,14 +70,19 @@ axioms = [
     { 'name': 'comp-mul', 'rule': ['(* a (~ a))', '0'] },
 ]
 
+
+def get_axiom(name):
+    for axiom in axioms:
+        if axiom['name'] == name:
+            return axiom
+    rerror(f'No such axiom {name}')
+
+
 class Node:
     def __init__(self, token, typ):
         self.token = token
         self.typ = typ
         self.children = []
-
-    def add_child(self, child):
-        self.children.append(child)
 
     def __str__(self):
         return f'{self.token} : {self.typ}'
@@ -118,7 +154,7 @@ def parse(text, tokens=None, root_node=None):
         else:
             perror(text, f'Expected end of statement at column {idx-1}', idx-1)
     else:
-        root_node.add_child(node)
+        root_node.children.append(node)
         return root_node
 
 
@@ -148,25 +184,52 @@ def generate_variable_names():
         idx += 1
 
 
+c = 0
 def clone_tree(node):
+    global c
+    c += 1
     new_node = Node(node.token, node.typ)
     for child in node.children:
         new_child = clone_tree(child)
-        new_node.add_child(new_child)
+        new_node.children.append(new_child)
     return new_node
 
 
-def trees_equal_weak(tree_a, tree_b):
+def trees_equal_weak(tree_a, tree_b, replacements=None):
     """
     Returns true if the given trees could be made equivalent if
     variable names are modified.
     """
-    # TODO
-    pass
+
+    if replacements is None:
+        replacements = {}
+
+    if tree_a.typ != tree_b.typ:
+        return False
+    if tree_a.typ == 'var':
+        if tree_a.token in replacements:
+            if replacements[tree_a.token] != tree_b.token:
+                return False
+        else:
+            replacements[tree_a.token] = tree_b.token
+    else:
+        if tree_a.token != tree_b.token:
+            return False
+        if len(tree_a.children) != len(tree_b.children):
+            return False
+        for child_a, child_b in zip(tree_a.children, tree_b.children):
+            if not trees_equal_weak(child_a, child_b):
+                return False
+    return True
 
 
+# memoize? are there ever repeated calls?
 def trees_equal(tree_a, tree_b):
-    # memoize? are there ever repeated calls?
+    """
+    Returns true if the given trees are strictly equal.
+    Each tree must have the same structure, and each pair
+    of corresponding nodes in each tree must have the same typ and token.
+    """
     if tree_a.typ != tree_b.typ:
         return False
     if tree_a.token != tree_b.token:
@@ -179,7 +242,67 @@ def trees_equal(tree_a, tree_b):
     return True
 
 
-def rule_applies_at_node(node, rule, scope={}):
+
+def hash_tree(node, depth=1):
+    """
+    Hashes a tree in a strict fashion so that the tree structures should be
+    equal and typ and token for all corresponding nodes should be equal.
+    """
+    h = 0
+    if node.typ == 'var':
+        h += pow(37, depth, LARGE_PRIME)
+        h += hash_string(node.token)
+    elif node.typ == 'prim':
+        h += pow(41, depth, LARGE_PRIME)
+        if node.token == '1':
+            h += pow(43, depth, LARGE_PRIME)
+        else:
+            h += pow(47, depth, LARGE_PRIME)
+    elif node.typ == 'op':
+        if node.token == '*':
+            h += pow(53, depth, LARGE_PRIME)
+        else:
+            h += pow(59, depth, LARGE_PRIME)
+        for idx, child in enumerate(node.children):
+            h += hash_tree(child, depth=depth+1)
+    return h % LARGE_PRIME
+
+
+def hash_tree_weak(node, index_generator=None, variable_hashes=None):
+    """
+    Return an integer hash of the given tree in such a way that two trees that are strictly equal
+    (including correct variable names) have the same hash.
+    """
+
+    if index_generator is None:
+        index_generator = itertools.count(4)
+    if variable_hashes is None:
+        variable_hashes = {}
+
+    h = 1
+    if node.typ == 'op':
+        h = (h * primes[0]) % LARGE_PRIME
+        h = (h * ord(node.token)) % LARGE_PRIME
+        for idx, child in enumerate(node.children):
+            child_hash = hash_tree_weak(child,
+                                   index_generator=index_generator,
+                                   variable_hashes=variable_hashes)
+            h = (h * (idx + child_hash)) % LARGE_PRIME
+    elif node.typ == 'prim':
+        h = (h * primes[1]) % LARGE_PRIME
+        h = (h * ord(node.token)) % LARGE_PRIME
+    elif node.typ == 'var':
+        h = (h * primes[2]) % LARGE_PRIME
+        if node.token not in variable_hashes:
+            idx = next(index_generator)
+            if idx > len(primes):
+                rerror('hash_tree_weak() :: We need more primes!')
+            variable_hashes[node.token] = primes[idx]
+        h = (h * variable_hashes[node.token]) % LARGE_PRIME
+    return h
+
+
+def rule_applies_at_node(node, rule, scope=None):
     """
     If the rule applies at the given node, this will return the subtrees
     that match the corresponding variables in the tree as a dictionary
@@ -197,6 +320,9 @@ def rule_applies_at_node(node, rule, scope={}):
     **  The rule can be applied iff all instances of this variable
         in the scope of the rule are equivalent in the tree.
     """
+
+    if scope is None:
+        scope = {}
 
     if rule.typ == 'op':
         if node.typ != 'op':
@@ -266,76 +392,138 @@ def apply_transformation(node, rule_from, rule_to, variable_name_generator):
     return new_node
 
 
-def possible_next_trees_for_rule(node, rule_from, rule_to, variable_name_generator):
+def possible_next_trees_for_rule(node, rule_name, rule_from, rule_to, variable_name_generator):
     """
     Return a list of all possible next trees for a given rule.
     """
     possible = []
     new_node = apply_transformation(node, rule_from, rule_to, variable_name_generator)
     if new_node is not None:
-        possible.append(new_node)
-    for child in node.children:
-        possible += possible_next_trees_for_rule(child, rule_from, rule_to, variable_name_generator)
+        possible.append((rule_name, new_node))
+    for i in range(len(node.children)):
+        child = node.children[i]
+        child_possible = possible_next_trees_for_rule(child, rule_name, rule_from, rule_to, variable_name_generator)
+        for child_rule_name, child_transformed in child_possible:
+            copy = clone_tree(node)
+            copy.children[i] = child_transformed
+            possible.append((child_rule_name, copy))
     return possible
 
 
-def possible_next_trees(node, variable_name_generator):
+def possible_next_trees(node, variable_name_generator=None):
     """
     Returns a list of all possible next trees (across all axioms).
     Reports as a list of tuples, where each tuple has two values:
         [ ( axiom name, new tree ), ... ]
     """
+
+    if variable_name_generator is None:
+        variable_name_generator = generate_variable_names()
+
     possible = []
     for axiom in axioms:
         rule_a, rule_b = axiom['rule']
+        rule_tree_a, rule_tree_b = parse(rule_a), parse(rule_b)
         # try a -> b
         possible += possible_next_trees_for_rule(node,
-                                                 rule_from=rule_a,
-                                                 rule_to=rule_b,
+                                                 rule_name=axiom['name'],
+                                                 rule_from=rule_tree_a,
+                                                 rule_to=rule_tree_b,
                                                  variable_name_generator=variable_name_generator)
-        
+
         # try b -> a
         possible += possible_next_trees_for_rule(node,
-                                                 rule_from=rule_b,
-                                                 rule_to=rule_a,
+                                                 rule_name=axiom['name'],
+                                                 rule_from=rule_tree_b,
+                                                 rule_to=rule_tree_a,
                                                  variable_name_generator=variable_name_generator)
     return possible
 
 
-def main(fname, verbose=False):
+def find_shortest_path(start_tree, target_tree, max_size=100, max_depth=8):
+    """
+    Attempts to find a shortest path from the start tree to the target tree.
+    If no path of length less than or equal to max_depth exists,
+    or where a tree of size greater than max_size is required in all shortest paths,
+    then None is return.
+    """
 
-    for axiom in axioms:
-        if axiom['name'] == 'comp-mul':
-            break
-    rule_from, rule_to = axiom['rule']
-    # print(rule_from)
-    # node = apply_transformation(
-    #     node=parse('(+ a (~ 0))'),
-    #     rule_from=parse(rule_from),
-    #     rule_to=parse(rule_to),
-    #     variable_name_generator=variable_name_generator,
-    # )
-    # if node is not None:
-    #     print(infix_string(node))
-    # else:
-    #     print('Cannot be done.')
-    variable_name_generator = generate_variable_names()
-    p = possible_next_trees(
-        node=parse('(* 0 (~ 0))'),
-        variable_name_generator=variable_name_generator,
-    )
-    for node in p:
-        print(infix_string(node))
-    
+    Q = deque()
+    visited = set()
+    parent = {}
+    depth = {}
+
+    htarget = infix_string(target_tree)
+    hstart = infix_string(start_tree)
+    Q.append(start_tree)
+    depth[hstart] = 0
+
+    while len(Q) > 0:
+        u = Q.popleft()
+        hu = infix_string(u)
+
+        if hu == htarget:
+            path = []
+            cur = u
+            hcur = hu
+            while hcur != hstart:
+                par, rule_name = parent[hcur]
+                path.append((cur, rule_name))
+                cur = par
+                hcur = infix_string(par)
+            return list(reversed(path))
+
+        if depth[hu] >= max_depth:
+            continue
+
+        for rule_name, v in possible_next_trees(u):
+            hv = infix_string(v)
+            if hv not in visited:
+                visited.add(hv)
+                depth[hv] = depth[hu] + 1
+                parent[hv] = (u, rule_name)
+                Q.append(v)
+    return None
+
+def main(fname):
+
+    # node = parse('1')
+    # for i in range(10):
+    #     name, node = random.choice(possible_next_trees(node))
+    # print(len(infix_string(node)))
+    # for i in range(10000):
+    #     infix_string(node)
+    # quit()
+
+    #axiom = get_axiom('abs-add')
+    #a = parse(axiom['rule'][0])
+    #b = parse(axiom['rule'][1])
+    #res = apply_transformation(parse('(* 0 1)'), b, a, variable_name_generator=generate_variable_names())
+    #print(infix_string(res))
+    # p = possible_next_trees(parse('(* 0 1)'))
+    # for rule_name, node in p:
+    #     print(infix_string(node), rule_name)
+    # quit()
+
+    # start = parse('(+ a (+ b c))')
+    # target = parse('(+ (+ a b) c)')
+    start = parse('1')
+    target = parse('0')
+    max_depth = 5
+    st = time.time()
+    path = find_shortest_path(start, target, max_depth=max_depth)
+    en = time.time()
+    print(f'prove {infix_string(start)} = {infix_string(target)}')
+    if path is None:
+        print(f'No path of length <= {max_depth}.')
+    else:
+        for idx, (node, rule_name) in enumerate(path):
+            print(f'  #{idx+1}  {infix_string(node)}  w/ {rule_name}')
+    print(f'Done in {en-st:0.2f} seconds.')
+
+    print(c)
+
     quit()
-    # Load axioms
-    for axiom in axioms:
-        name = axiom['name']
-        print(f'Tree for axiom {name}')
-        rule_a, rule_b = axiom['rule']
-        tree_a, tree_b = parse(rule_a), parse(rule_b)
-        print_tree(tree_a)
-        print_tree(tree_b)
 
     with open(fname, 'r') as f:
         for idx, line in enumerate(f):
@@ -348,4 +536,9 @@ def main(fname, verbose=False):
             print(infix_string(tree))
 
 if __name__ == '__main__':
-    Fire(main)
+    # cProfile.run('main(fname=\'example.txt\')')
+    # Fire(main)
+    if len(sys.argv) < 2:
+        print(f'Usage: {sys.argv[0]} [filename]')
+        quit(1)
+    main(fname=sys.argv[1])
