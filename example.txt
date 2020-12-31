@@ -7,8 +7,8 @@ axiom com_add : (+ a b) = (+ b a).
 axiom com_mul : (* a b) = (* b a).
 
 # Absorption
-axiom abs_add : (+ a (* a b)) = a.
-axiom abs_mul : (* a (+ a b)) = a.
+#axiom abs_add : (+ a (* a b)) = a.
+#axiom abs_mul : (* a (+ a b)) = a.
 
 # Identity
 axiom ide_add : (+ a 0) = a.
@@ -22,14 +22,30 @@ axiom dis_mul : (* a (+ b c)) = (+ (* a b) (* a c)).
 axiom inv_add : (+ a (~ a)) = 1.
 axiom inv_mul : (* a (~ a)) = 0.
 
+# Now tell the interpreter to use proofs as axioms
+param use_proofs_as_axioms false.
+
+# Set parameters for search
+param max_search_depth 15.
+param max_tree_size 25.
+
+# We can set these as axioms, but we can also prove them now
+#prove (+ x 1) = 1.
+#prove (+ x 1) = (* (+ x 1) 1).
+#prove (* (+ x 1) 1) = (* 1 (+ x 1)).
+#prove (* 1 (+ x 1)) = (* (+ x (~ x)) (+ x 1)).
+prove 1 = (+ x (~ x)).
+#prove (* x 0) = 0.
+
+#prove (+ a (* a b)) = a.
 
 # Proof of trivial length
-prove 1 = 1.  
+#prove 1 = 1.  
 
 # Simple identities
-prove (+ 0 1) = 1.
-prove (+ 1 0) = 1.
-prove (* k 1) = k.
+#prove (+ 0 1) = 1.
+#prove (+ 1 0) = 1.
+#prove (* k 1) = k.
 
 # Prove null-law (slower)
-prove (* k 0) = 0.
+#prove (* k 0) = 0.

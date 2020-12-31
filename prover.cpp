@@ -19,12 +19,17 @@ primitive -> '0' | '1'
 id -> { <alpha> | '_' } { <alphanumeric> }*
 binary_operator -> '*' | '+'
 unary_operator -> '~'
+int_param -> 'max_tree_size'
+           | 'max_search_depth'
+bool_param -> 'use_proofs_as_axioms'
 formula -> <primitive>
          | <id>
          | '(' <binary_operator> <formula> <formula> ')'
          | '(' <unary_operator> <formula> ')'
 command -> 'axiom' <id> ':' <formula> '=' <formula> '.'
          | 'prove' <formula> '.'
+         | 'param' <int_param> <int> '.'
+         | 'param' <bool_param> <bool> '.'
 */
 
 bool is_bop_token(string tok) { return tok == "*" || tok == "+"; }
@@ -40,9 +45,30 @@ bool is_id_token(string tok) {
     }
     return true;
 }
+
 bool is_single_char_token(char tok) {
-    string toks = string("*+~01=:().");
+    string toks = string("*+~=:().");
     return toks.find(tok) != string::npos;
+}
+
+bool is_pos_int_token(string tok) {
+    for (char c : tok) {
+        if (!isdigit(c)) return false;
+    }
+    return true;
+}
+
+bool is_pos_int_param_token(string tok) {
+    return tok == "max_tree_size" ||
+           tok == "max_search_depth";
+}
+
+bool is_bool_param_token(string tok) {
+    return tok == "use_proofs_as_axioms";
+}
+
+bool is_bool_token(string tok) {
+    return tok == "true" || tok == "false";
 }
 
 void
@@ -60,7 +86,11 @@ rerror(string msg)
     cerr << "Runtime Error: " << msg << endl;
 }
 
-enum NodeType { OP, VAR, PRIM, AXIOM, PROVE, ROOT };
+enum NodeType {
+    /* formulas */ OP, VAR, PRIM, UNRES,
+    /* commands */ AXIOM, PROVE, PARAM,
+    /* program root */ ROOT
+};
 
 struct Node {
     string token;
@@ -79,7 +109,7 @@ public:
     int idx;
     VariableNameGenerator() : idx(0) {}
     string next() {
-        return "__" + to_string(idx++);
+        return "?" + to_string(idx++);
     }
 };
 
@@ -110,7 +140,7 @@ public:
 
         // is it a word token?
         string word_tok;
-        if (idx < (int)text.size() && (isalpha(text[idx]) || text[idx] == '_')) {
+        if (idx < (int)text.size() && (isalnum(text[idx]) || text[idx] == '_')) {
             word_tok.push_back(text[idx]);
             idx++;
             col++;
@@ -278,7 +308,59 @@ parse_command(Tokenizer &tokenizer)
         }
 
         node.children.push_back(parse_formula(tokenizer));
-        
+
+    } else if (tok == "param") {
+        string param_name = tokenizer.next();
+        if (is_pos_int_param_token(param_name)) {
+            string value = tokenizer.next();
+
+            if (is_pos_int_token(value)) {
+                node.token = param_name;
+                node.type = PARAM;
+                Node child = {
+                    .token = value,
+                    .type = VAR,
+                    .children = {}
+                };
+                node.children.push_back(child);
+
+            } else {
+                perror(tokenizer.line,
+                    "Expected integer value for hyper parameter.",
+                    tokenizer.line_number+1,
+                    tokenizer.col);
+                exit(1);
+            }
+
+        } else if (is_bool_param_token(param_name)) {
+            string value = tokenizer.next();
+
+            if (is_bool_token(value)) {
+                node.token = param_name;
+                node.type = PARAM;
+                Node child = {
+                    .token = value,
+                    .type = VAR,
+                    .children = {}
+                };
+                node.children.push_back(child);
+
+            } else {
+                perror(tokenizer.line,
+                    "Expected number value for hyper parameter.",
+                    tokenizer.line_number+1,
+                    tokenizer.col);
+                exit(1);
+            }
+
+        } else {
+            perror(tokenizer.line,
+                   "Expected either 'max_tree_size' or 'max_search_depth' hyper parameter.",
+                   tokenizer.line_number+1,
+                   tokenizer.col);
+            exit(1);
+        }
+
     } else {
         perror(tokenizer.line,
                "Unexpected token. Command must either be 'axiom' or 'prove'",
@@ -328,6 +410,8 @@ to_string(Node node)
         return node.token;
     } else if (node.type == VAR) {
         return node.token;
+    } else if (node.type == UNRES) {
+        return node.token;
     } else if (node.type == AXIOM) {
         string left = to_string(node.children[0]);
         string right = to_string(node.children[1]);
@@ -347,7 +431,7 @@ to_string(Node node)
         return ret;
     } else {
         rerror("to_string(Node) :: Invalid node type");
-        return node.token;
+        exit(1);
     }
 }
 
@@ -357,11 +441,132 @@ clone_tree(Node node)
     return parse(to_string(node));
 }
 
-bool
-trees_equal(Node node_a, Node node_b)
+
+set<string>
+get_variables(Node node)
 {
-    return to_string(node_a) == to_string(node_b);
+    set<string> variables;
+    if (node.type == OP) {
+        for (Node child : node.children) {
+            for(string var : get_variables(child)) {
+                variables.insert(var);
+            }
+        }
+    } else if (node.type == PRIM) {
+        // pass
+    } else if (node.type == VAR || node.type == UNRES) {
+        variables.insert(node.token);
+    } else {
+        rerror("get_variables() :: unexpected node type.");
+        exit(1);
+    }
+    return variables;
 }
+
+
+bool
+trees_have_same_structure(Node a, Node b)
+{
+    if (a.type == OP) if (b.type != OP) return false;
+    if (a.type == PRIM) if (b.type != PRIM) return false;
+    if (a.type == VAR) if (b.type != VAR && b.type != UNRES) return false;
+    if (a.type == UNRES) if (b.type != VAR && b.type != UNRES) return false;
+    if (a.children.size() != b.children.size()) return false;
+    for (int i = 0; i < (int)a.children.size(); i++) {
+        if (!trees_have_same_structure(a.children[i], b.children[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+bool
+trees_resolvable(Node a, Node b, map<string, string> &resolutions)
+{
+    if (a.type == OP) {
+        if (b.type != OP) return false;
+        if (a.token != b.token) return false;
+    } else if (a.type == PRIM) {
+        if (b.type != PRIM) return false;
+        if (a.token != b.token) return false;
+    } else if (a.type == VAR) {
+        if (b.type == VAR) {
+            return a.token == b.token;
+        } else if (b.type == UNRES) {
+            if (resolutions.find(b.token) != resolutions.end()) {
+                return false;
+            } else {
+                resolutions[b.token] = a.token;
+            }
+        }
+    }
+    if (a.children.size() != b.children.size()) return false;
+    for (int i = 0; i < (int)a.children.size(); i++) {
+        if (!trees_resolvable(a.children[i], b.children[i], resolutions)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+bool
+trees_resolvable(Node a, Node b)
+{
+    set<NodeType> allowed = {OP, VAR, PRIM, UNRES};
+    if (allowed.find(a.type) == allowed.end() || allowed.find(b.type) == allowed.end()) {
+        rerror("trees_have_equal_structure() :: unexpected node type.");
+        exit(1);
+    }
+    map<string, string> resolutions;
+    return trees_resolvable(a, b, resolutions);
+}
+
+
+bool
+trees_equal(Node a, Node b, map<string, string> resolutions)
+{
+    if (a.type == OP) {
+        if (b.type == OP) {
+            return a.token == b.token;
+        } else {
+            return false;
+        }
+    } else if (a.type == PRIM) {
+        if (b.type == PRIM) {
+            return a.token == b.token;
+        } else {
+            return false;
+        }
+    } else if (a.type == VAR) {
+        if (b.type == VAR) {
+            return a.token == b.token;
+        } else if (b.type == UNRES) {
+            if (resolutions.find(b.token) != resolutions.end()) {
+                return a.token == resolutions[b.token];
+            } else {
+                resolutions[b.token] = a.token;
+            }
+        } else {
+            return false;
+        }
+    } else if (a.type == UNRES) {
+        if (b.type == VAR) {
+            if (resolutions.find(a.token) != resolutions.end()) {
+                return b.token == resolutions[a.token];
+            } else {
+                resolutions[a.token] = b.token;
+            }
+        } else if (b.type == UNRES) {
+
+        }
+    } else {
+        rerror("trees_equal() :: Unexpected node type.");
+        exit(1);
+    }
+}
+
 
 /*
     If the rule applies at the given node, this will return the subtrees
@@ -370,11 +575,11 @@ trees_equal(Node node_a, Node node_b)
     Otherwise, this returns None.
 
     At each node in the subtree, use the following table:
-    rule \ node  |    op          |   var      |   prim  
+    rule \ node  |    op          |  var/unres  |   prim
     -----------------------------------------------------------
-        op       | iff same tok * |   False    |   False
-        var      |      **        |     **     |     **
-        prim     |    False       |   False    | iff same tok
+        op       | iff same tok * |  false      |   false
+        var      |      **        |    **       |     **
+        prim     |    false       |  false      | iff same tok
 
     *   The rules must also be checked recursively for all children.
     **  The rule can be applied iff all instances of this variable
@@ -401,7 +606,7 @@ get_rule_replacements(Node node, Node rule, map<string, Node> &scope)
         }
     }
 
-    if (rule.type == VAR) {
+    if (rule.type == VAR || rule.type == UNRES) {
         if (scope.find(rule.token) != scope.end()) {
             if (!trees_equal(scope[rule.token], node)) {
                 return false;
@@ -431,23 +636,15 @@ get_rule_replacements(Node node, Node rule, map<string, Node> &scope)
 
 
 Node
-replace_variables(Node node, map<string, Node> &scope, VariableNameGenerator &var_gen)
+replace_variables(Node node, map<string, Node> &scope)
 {
     if (node.type == VAR) {
-        if (scope.find(node.token) != scope.end()) {
-            return scope[node.token];
-        } else {
-            return {
-                .token = var_gen.next(),
-                .type = VAR,
-                .children = {},
-            };
-        }
+        return scope[node.token];
     } else if (node.type == PRIM) {
         return node;
     } else if (node.type == OP) {
         for (int i = 0; i < (int)node.children.size(); i++) {
-            node.children[i] = replace_variables(node.children[i], scope, var_gen);
+            node.children[i] = replace_variables(node.children[i], scope);
         }
         return node;
     } else {
@@ -463,7 +660,18 @@ apply_transformation(bool &ok, Node node, Node rule_from, Node rule_to, Variable
     map<string, Node> scope;
     ok = get_rule_replacements(node, rule_from, scope);
     if (!ok) return {};
-    return replace_variables(rule_to, scope, var_gen);
+    for (string var : get_variables(rule_to)) {
+        if (scope.find(var) == scope.end()) {
+            // var is unused
+            Node replacement = {
+                .token = var_gen.next(),
+                .type = UNRES,
+                .children = {}
+            };
+            scope[var] = replacement;
+        }
+    }
+    return replace_variables(rule_to, scope);
 }
 
 
@@ -498,9 +706,8 @@ possible_next_trees_for_rule(
 
 
 vector<pair<string, Node>>
-possible_next_trees(vector<Axiom> axioms, Node node)
+possible_next_trees(vector<Axiom> axioms, Node node, VariableNameGenerator &var_gen)
 {
-    auto var_gen = VariableNameGenerator();
     vector<pair<string, Node>> possible;
     for (Axiom axiom : axioms) {
         // try a -> b
@@ -519,12 +726,13 @@ possible_next_trees(vector<Axiom> axioms, Node node)
 
 
 vector<pair<string, Node>>
-find_shortest_path(bool &ok, int &states, vector<Axiom> axioms, Node start, Node target, int max_depth=4)
+find_shortest_path(bool &ok, int &states, vector<Axiom> axioms, Node start, Node target, int max_depth=4, int max_tree_size=40)
 {
     queue<Node> Q;
     set<string> vis;
     map<string, pair<string, Node>> parent;
     map<string, int> depth;
+    VariableNameGenerator var_gen = VariableNameGenerator();
 
     string hstart = to_string(start);
     string htarget = to_string(target);
@@ -553,11 +761,11 @@ find_shortest_path(bool &ok, int &states, vector<Axiom> axioms, Node start, Node
             return path;
         }
 
-        if (depth[hu] >= max_depth) {
+        if ((int)hu.size() > max_tree_size || depth[hu] >= max_depth) {
             continue;
         }
 
-        for (pair<string, Node> pr : possible_next_trees(axioms, u)) {
+        for (pair<string, Node> pr : possible_next_trees(axioms, u, var_gen)) {
             Node v = pr.second;
             string hv = to_string(v);
             if (vis.find(hv) == vis.end()) {
@@ -574,27 +782,6 @@ find_shortest_path(bool &ok, int &states, vector<Axiom> axioms, Node start, Node
 }
 
 
-vector<Axiom>
-hoist_axioms(Node root)
-{
-    vector<Axiom> axioms;
-    if (root.type != ROOT) {
-        rerror("hoist_axioms() :: invalid node type");
-    }
-    for (Node cmd : root.children) {
-        if (cmd.type == AXIOM) {
-            Axiom axiom = {
-                .name = cmd.token,
-                .rule_a = cmd.children[0],
-                .rule_b = cmd.children[1]
-            };
-            axioms.push_back(axiom);
-        }
-    }
-    return axioms;
-}
-
-
 Axiom
 search_axiom(vector<Axiom> axioms, string name)
 {
@@ -608,7 +795,8 @@ search_axiom(vector<Axiom> axioms, string name)
 }
 
 
-string read_file(string fname)
+string
+read_file(string fname)
 {
     ifstream f(fname);
     stringstream buffer;
@@ -624,38 +812,78 @@ int main(int argc, char ** argv)
         exit(1);
     }
 
-    int max_depth = 4;
+    // defaults
+    int max_search_depth = 8;
+    int max_tree_size = 20;
+    bool use_proofs_as_axioms = false;
 
     string code = read_file(argv[1]);
     Node root = parse(code);
 
-    vector<Axiom> axioms = hoist_axioms(root);
+    vector<Axiom> axioms;
 
     for (Node cmd : root.children) {
         if (cmd.type == PROVE) {
             Node start = cmd.children[0];
             Node target = cmd.children[1];
-            cout << "Prove " << to_string(start) << " = " << to_string(target) << ": " << endl;
+            string start_string = to_string(start);
+            string target_string = to_string(target);
+            cout << "Prove " << to_string(start) << " = " << to_string(target) << "..." << endl;
             bool ok;
             int states;
             auto st_clock = chrono::high_resolution_clock::now();
-            auto path = find_shortest_path(ok, states, axioms, start, target, max_depth);
+            auto path = find_shortest_path(ok, states, axioms, start, target, max_search_depth, max_tree_size);
             auto en_clock = chrono::high_resolution_clock::now();
             auto elapsed = chrono::duration_cast<chrono::milliseconds>(en_clock - st_clock);
             double elapsed_seconds = ((double)elapsed.count()) / 1000.0;
             if (ok) {
+
                 if (0 == (int)path.size()) {
                     cout << "Statements are the same." << endl;
                 } else {
+                    cout << start_string << endl;
                     for (auto pr : path) {
                         Node node = pr.second;
                         string rule_name = pr.first;
-                        cout << "-> " << to_string(node) << "  w/ " << rule_name << endl;
+                        cout << " = " << to_string(node) << "  w/ " << rule_name << endl;
                     }
-                    cout << "Done in " << setprecision(3) << fixed << elapsed_seconds << " seconds after checking " << states << " states." << endl;
+                    cout << "Done in " << setprecision(3) << fixed << elapsed_seconds
+                         << " seconds after checking " << states << " states." << endl;
                 }
+
+                if (use_proofs_as_axioms) {
+                    Axiom axiom = {
+                        .name = "proof of " + to_string(start) + " = " + to_string(target),
+                        .rule_a = start,
+                        .rule_b = target
+                    };
+                    axioms.push_back(axiom);
+                }
+
             } else {
-                cout << "No path found within " << max_depth << " steps.";
+                cout << "No path found within " << max_search_depth
+                     << " steps after checking " << states << " states in "
+                     << setprecision(3) << fixed << elapsed_seconds << " seconds." << endl;
+            }
+
+        } else if (cmd.type == AXIOM) {
+            Axiom axiom = {
+                .name = cmd.token,
+                .rule_a = cmd.children[0],
+                .rule_b = cmd.children[1]
+            };
+            axioms.push_back(axiom);
+
+        } else if (cmd.type == PARAM) {
+            if (cmd.token == "max_search_depth") {
+                max_search_depth = stoi(cmd.children[0].token);
+            } else if (cmd.token == "max_tree_size") {
+                max_tree_size = stoi(cmd.children[0].token);
+            } else if (cmd.token == "use_proofs_as_axioms") {
+                use_proofs_as_axioms = cmd.children[0].token == "true";
+            } else {
+                rerror("main() :: unexpected parameter " + cmd.token);
+                exit(1);
             }
         }
     }

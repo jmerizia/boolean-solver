@@ -1,5 +1,5 @@
 CC = g++
-CFLAGS = -std=c++2a -Wall -Wextra -Werror -O3
+CFLAGS = -std=c++2a -Wall -Wextra -Werror -Ofast
 TARGET = prover
 
 default:
